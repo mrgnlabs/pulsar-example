@@ -1,6 +1,7 @@
 import { Connection, PublicKey } from "@solana/web3.js";
-import { NodeWallet, nativeToUi } from "@mrgnlabs/mrgn-common";
+import { nativeToUi } from "@mrgnlabs/mrgn-common";
 import {
+  Balance,
   Bank,
   MarginRequirementType,
   MarginfiAccount,
@@ -40,6 +41,18 @@ interface UserAccountSnapshot {
   totalBorrowsUsdValue: number; // ($)
   initialHealthFactor: number; // (%) metric representing the health of the account wrt to the initial margin requirements (<0% == unable to withdraw collateral or take on additional liabilities)
   maintenanceHealthFactor: number; // (%) metric representing the health of the account wrt to the maintenance margin requirements (<0% == open to partial liquidation)
+  positions: UserPositions;
+}
+
+interface UserPositions {
+  deposits: UserPosition[];
+  borrows: UserPosition[];
+}
+
+interface UserPosition {
+  tokenMint: string;
+  amount: number;
+  usdValue: number;
 }
 
 async function main() {
@@ -70,7 +83,8 @@ async function main() {
   console.log("--> Generating banks snapshot");
 
   const bankMetadataMap = await loadBankMetadatas();
-  const banksShaped = [...client.group.banks.values()].map((bank) => {
+  const banksRaw = [...client.group.banks.values()];
+  const banksShaped = banksRaw.map((bank) => {
     const bankAddress = bank.publicKey.toBase58();
 
     const bankMetadata = bankMetadataMap[bankAddress];
@@ -102,7 +116,7 @@ async function main() {
   ); // Fetch all user accounts under that wallet (there can be any number)
 
   const userAccountsShaped = marginfiAccounts.map((account) =>
-    shapeUserAccount(account)
+    shapeUserAccount(account, banksRaw)
   );
   for (const account of userAccountsShaped) {
     console.log(account);
@@ -143,7 +157,8 @@ function shapeBank(bank: Bank, bankMetadata: BankMetadata): BankSnapshot {
 }
 
 function shapeUserAccount(
-  marginfiAccount: MarginfiAccount
+  marginfiAccount: MarginfiAccount,
+  banks: Bank[]
 ): UserAccountSnapshot {
   const { assets: assetsEquity, liabilities: liabilitiesEquity } =
     marginfiAccount.getHealthComponents(MarginRequirementType.Equity);
@@ -151,6 +166,20 @@ function shapeUserAccount(
     marginfiAccount.getHealthComponents(MarginRequirementType.Maint);
   const { assets: assetsInitial, liabilities: liabilitiesInitial } =
     marginfiAccount.getHealthComponents(MarginRequirementType.Init);
+
+  const positions = marginfiAccount.activeBalances.reduce<UserPositions>(
+    (acc, balance) => {
+      const { isDeposit, position } = shapePosition(balance, banks);
+      if (isDeposit) {
+        acc.deposits.push(position);
+      } else {
+        acc.borrows.push(position);
+      }
+
+      return acc;
+    },
+    { deposits: [], borrows: [] }
+  );
 
   return {
     authority: marginfiAccount.authority.toBase58(),
@@ -171,6 +200,32 @@ function shapeUserAccount(
           .div(assetsMaintenance)
           .times(100)
           .toNumber(),
+    positions,
+  };
+}
+
+function shapePosition(
+  balance: Balance,
+  banks: Bank[]
+): { isDeposit: boolean; position: UserPosition } {
+  const bank = banks.find((bank) => bank.publicKey.equals(balance.bankPk));
+  if (!bank) throw new Error(`Missing bank for ${balance.bankPk.toBase58()}`);
+
+  const amounts = balance.getQuantity(bank);
+  const usdValues = balance.getUsdValue(bank, MarginRequirementType.Equity);
+  const isDeposit = usdValues.liabilities.isZero();
+
+  return {
+    position: {
+      tokenMint: bank.mint.toBase58(),
+      amount: isDeposit
+        ? nativeToUi(amounts.assets.toNumber(), bank.mintDecimals)
+        : nativeToUi(amounts.liabilities.toNumber(), bank.mintDecimals),
+      usdValue: isDeposit
+        ? usdValues.assets.toNumber()
+        : usdValues.liabilities.toNumber(),
+    },
+    isDeposit,
   };
 }
 
@@ -190,10 +245,10 @@ const BankMetadataRaw = object({
 });
 const BankMetadataList = array(BankMetadataRaw);
 
-export type BankMetadataRaw = Infer<typeof BankMetadataRaw>;
-export type BankMetadataListRaw = Infer<typeof BankMetadataList>;
+type BankMetadataRaw = Infer<typeof BankMetadataRaw>;
+type BankMetadataListRaw = Infer<typeof BankMetadataList>;
 
-export async function loadBankMetadatas(): Promise<{
+async function loadBankMetadatas(): Promise<{
   [address: string]: BankMetadata;
 }> {
   const response = await fetch(
