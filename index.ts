@@ -50,6 +50,7 @@ interface UserPositions {
 }
 
 interface UserPosition {
+  tokenSymbol: string;
   tokenMint: string;
   amount: number;
   usdValue: number;
@@ -116,7 +117,7 @@ async function main() {
   ); // Fetch all user accounts under that wallet (there can be any number)
 
   const userAccountsShaped = marginfiAccounts.map((account) =>
-    shapeUserAccount(account, banksRaw)
+    shapeUserAccount(account, banksRaw, bankMetadataMap)
   );
   for (const account of userAccountsShaped) {
     console.log(account);
@@ -158,7 +159,8 @@ function shapeBank(bank: Bank, bankMetadata: BankMetadata): BankSnapshot {
 
 function shapeUserAccount(
   marginfiAccount: MarginfiAccount,
-  banks: Bank[]
+  banks: Bank[],
+  bankMetadataMap: BankMetadataMap
 ): UserAccountSnapshot {
   const { assets: assetsEquity, liabilities: liabilitiesEquity } =
     marginfiAccount.getHealthComponents(MarginRequirementType.Equity);
@@ -169,7 +171,11 @@ function shapeUserAccount(
 
   const positions = marginfiAccount.activeBalances.reduce<UserPositions>(
     (acc, balance) => {
-      const { isDeposit, position } = shapePosition(balance, banks);
+      const { isDeposit, position } = shapePosition(
+        balance,
+        banks,
+        bankMetadataMap
+      );
       if (isDeposit) {
         acc.deposits.push(position);
       } else {
@@ -206,10 +212,16 @@ function shapeUserAccount(
 
 function shapePosition(
   balance: Balance,
-  banks: Bank[]
+  banks: Bank[],
+  bankMetadataMap: BankMetadataMap
 ): { isDeposit: boolean; position: UserPosition } {
   const bank = banks.find((bank) => bank.publicKey.equals(balance.bankPk));
   if (!bank) throw new Error(`Missing bank for ${balance.bankPk.toBase58()}`);
+
+  const bankMetadata = bankMetadataMap[balance.bankPk.toBase58()];
+  if (!bankMetadata) {
+    throw new Error(`Missing metadata for bank ${balance.bankPk.toBase58()}`);
+  }
 
   const amounts = balance.getQuantity(bank);
   const usdValues = balance.getUsdValue(bank, MarginRequirementType.Equity);
@@ -217,6 +229,7 @@ function shapePosition(
 
   return {
     position: {
+      tokenSymbol: bankMetadata.tokenSymbol,
       tokenMint: bank.mint.toBase58(),
       amount: isDeposit
         ? nativeToUi(amounts.assets.toNumber(), bank.mintDecimals)
@@ -236,6 +249,7 @@ interface BankMetadata {
   tokenName: string;
   tokenSymbol: string;
 }
+type BankMetadataMap = { [address: string]: BankMetadata };
 
 const BankMetadataRaw = object({
   bankAddress: string(),
