@@ -41,6 +41,7 @@ interface UserAccountSnapshot {
   totalBorrowsUsdValue: number; // ($)
   initialHealthFactor: number; // (%) metric representing the health of the account wrt to the initial margin requirements (<0% == unable to withdraw collateral or take on additional liabilities)
   maintenanceHealthFactor: number; // (%) metric representing the health of the account wrt to the maintenance margin requirements (<0% == open to partial liquidation)
+  liquidationMargin: number; // ($) value remaining before the account is liquidated i.e. value the collat can go down, or the liabilities can go up, before liquidation starts
   positions: UserPositions;
 }
 
@@ -169,6 +170,10 @@ function shapeUserAccount(
   const { assets: assetsInitial, liabilities: liabilitiesInitial } =
     marginfiAccount.getHealthComponents(MarginRequirementType.Init);
 
+  const liquidationMargin = assetsMaintenance
+    .minus(liabilitiesMaintenance)
+    .toNumber();
+
   const positions = marginfiAccount.activeBalances.reduce<UserPositions>(
     (acc, balance) => {
       const { isDeposit, position } = shapePosition(
@@ -206,6 +211,7 @@ function shapeUserAccount(
           .div(assetsMaintenance)
           .times(100)
           .toNumber(),
+    liquidationMargin,
     positions,
   };
 }
